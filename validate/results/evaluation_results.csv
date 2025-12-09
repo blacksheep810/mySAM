@@ -1,0 +1,7 @@
+timestamp,checkpoint_path,prompt_type,dataset,mIOU,num_samples,img_size,batch_size
+2025-12-03 11:38:25,/root/workspace/mySAM/outputs/checkpoint_epoch_30.pth,box,/root/workspace/mySAM/data/ISIC,0.2231,379,1024,8
+2025-12-03 11:43:12,/root/workspace/mySAM/outputs/checkpoint_epoch_30.pth,box,/root/workspace/mySAM/data/ISIC,0.2231,379,1024,8
+2025-12-03 11:49:11,SAM Pretrained,/root/workspace/mySAM/checkpoints/sam_vit_b_01ec64.pth,box,/root/workspace/mySAM/data/ISIC,0.2228,379,1024,8,N/A,,
+2025-12-03 11:49:11,Your Trained,/root/workspace/mySAM/outputs/checkpoint_epoch_30.pth,box,/root/workspace/mySAM/data/ISIC,0.2231,379,1024,8,29,+0.0004,+0.17%
+2025-12-03 12:03:54,SAM Pretrained,/root/workspace/mySAM/checkpoints/sam_vit_b_01ec64.pth,box,/root/workspace/mySAM/data/ISIC,0.2228,379,1024,8,N/A,,
+2025-12-03 12:03:54,Your Trained,/root/workspace/mySAM/outputs/checkpoint_epoch_30.pth,box,/root/workspace/mySAM/data/ISIC,0.2231,379,1024,8,29,+0.0004,+0.17%
