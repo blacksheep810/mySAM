@@ -1,0 +1,35 @@
+# 模型对比验证配置文件
+# 所有路径均为相对于项目根目录的相对路径
+
+# ========== 数据集配置 ==========
+data:
+  # ISIC 数据集根目录（相对于项目根目录）
+  data_root: "./data/ISIC"
+  # 测试集 box CSV 文件路径（相对于项目根目录）
+  test_box_csv: "./data/ISIC/test_boxes.csv"
+
+# ========== 模型配置 ==========
+models:
+  # SAM 原始模型 checkpoint（默认使用 huge 模型，相对于项目根目录）
+  sam_checkpoint: "./checkpoints/sam_vit_h_4b8939.pth"
+  # 训练好的模型 checkpoint（相对于项目根目录）
+  trained_checkpoint: "./outputs_huge/checkpoint_epoch_30.pth"
+  # 训练好的模型类型（可选，如果为 null 则自动检测）
+  # 可选值: vit_b, vit_l, vit_h, null
+  trained_model_type: null  # 自动检测（实际为 vit_b/base 模型）
+  
+  # SAM 各类型模型的 checkpoint 路径（用于自动查找，相对于项目根目录）
+  checkpoint_paths:
+    vit_b: "./checkpoints/sam_vit_b_01ec64.pth"
+    vit_h: "./checkpoints/sam_vit_h_4b8939.pth"
+
+# ========== 评估配置 ==========
+evaluation:
+  # 批次大小
+  batch_size: 4
+  # 图像尺寸
+  img_size: 1024
+  # 数据加载器工作进程数
+  num_workers: 4
+  # 设备 (cuda/cpu)
+  device: "cuda"

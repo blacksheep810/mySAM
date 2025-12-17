@@ -177,10 +177,7 @@ def compute_miou(pred_logits, gt_masks, threshold=0.5):
     
     # 返回平均IoU
     return iou_per_sample.mean().item()
-
-
-# In[12]:
-
+    
 
 def collate_fn_isic(batch):
     """将 ISIC2016Dataset 的 batch 转换为训练所需的格式"""
@@ -295,13 +292,6 @@ def sample_points_in_ring(small_box, big_box, num_points=10, img_size=1024):
     
     return points, labels
 
-
-# In[13]:
-
-
-# -----------------------------
-# 参数解析器
-# -----------------------------
 def build_argparser():
     p = argparse.ArgumentParser()
     p.add_argument('--data_root', type=str, required=True, help='ISIC 数据集根目录')
@@ -331,13 +321,6 @@ def build_argparser():
     p.add_argument('--save_every', type=int, default=1)
     return p
 
-
-# In[14]:
-
-
-# -----------------------------
-# 训练主函数
-# -----------------------------
 def train_main(args):
     set_seed(42)
     mkdir(args.output_dir)
@@ -620,44 +603,46 @@ def train_main(args):
                     big_box = boxes_list_sam[b]  # 已经是 list [x1, y1, x2, y2]，已缩放到 SAM 尺寸
                     small_box = small_boxes_list_sam[b]
                     
-                    # 在大小框中间区域采样离散点作为 prompt
+                    # 方案1：同时输入大框和小框（推荐，综合信息更丰富）
                     if small_box is not None:
-                        points, point_labels = sample_points_in_ring(
-                            small_box, big_box, 
-                            num_points=10,  # 采样点数量
-                            img_size=sam_input_size  # 使用 SAM 输入尺寸
-                        )
-                        points = points.to(device)  # (N, 2)
-                        point_labels = point_labels.to(device)  # (N,)
-                        
-                        # SAM 需要 points 格式: (1, N, 2) 和 labels: (1, N)
-                        points_tensor = points.unsqueeze(0)  # (1, N, 2)
-                        labels_tensor = point_labels.unsqueeze(0)  # (1, N)
-                    else:
-                        # 如果没有 small_box，回退到使用 big_box
+                        # 将大框和小框合并，形状为 (2, 4)
+                        boxes_tensor = torch.tensor([big_box, small_box], device=device, dtype=torch.float32)  # (2, 4)
                         points_tensor = None
                         labels_tensor = None
-                        box_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)  # (1, 4)
+                    else:
+                        # 如果没有 small_box，只使用 big_box
+                        boxes_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)  # (1, 4)
+                        points_tensor = None
+                        labels_tensor = None
+                    
+                    # 方案2：使用点 prompt（保留作为备选）
+                    # if small_box is not None:
+                    #     points, point_labels = sample_points_in_ring(
+                    #         small_box, big_box, 
+                    #         num_points=10,
+                    #         img_size=sam_input_size
+                    #     )
+                    #     points = points.to(device)
+                    #     point_labels = point_labels.to(device)
+                    #     points_tensor = points.unsqueeze(0)  # (1, N, 2)
+                    #     labels_tensor = point_labels.unsqueeze(0)  # (1, N)
+                    #     boxes_tensor = None
+                    # else:
+                    #     boxes_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)
+                    #     points_tensor = None
+                    #     labels_tensor = None
                     
                     try:
                         # 处理DataParallel：需要通过module访问
                         teacher_prompt_encoder = teacher.module.prompt_encoder if use_multi_gpu else teacher.prompt_encoder
                         teacher_mask_decoder = teacher.module.mask_decoder if use_multi_gpu else teacher.mask_decoder
                         
-                        if points_tensor is not None:
-                            # 使用点 prompt
-                            sparse_p, dense_p = teacher_prompt_encoder(
-                                points=(points_tensor, labels_tensor), 
-                                boxes=None, 
-                                masks=None
-                            )
-                        else:
-                            # 回退到 box prompt
-                            sparse_p, dense_p = teacher_prompt_encoder(
-                                points=None, 
-                                boxes=box_tensor, 
-                                masks=None
-                            )
+                        # 同时输入多个框（大框+小框）
+                        sparse_p, dense_p = teacher_prompt_encoder(
+                            points=(points_tensor, labels_tensor) if points_tensor is not None else None,
+                            boxes=boxes_tensor,
+                            masks=None
+                        )
                         
                         out = teacher_mask_decoder(
                             image_embeddings=t_img_emb[b:b+1],
@@ -720,39 +705,46 @@ def train_main(args):
                     big_box = boxes_list_sam[b]  # 使用缩放后的 big_box（SAM 尺寸）
                     small_box = small_boxes_list_sam[b]
                     
-                    # 在大小框中间区域采样离散点作为 prompt（与 teacher 一致）
+                    # 方案1：同时输入大框和小框（与 teacher 一致）
                     if small_box is not None:
-                        points, point_labels = sample_points_in_ring(
-                            small_box, big_box, 
-                            num_points=10,
-                            img_size=sam_input_size  # 使用 SAM 输入尺寸
-                        )
-                        points = points.to(device)
-                        point_labels = point_labels.to(device)
-                        points_tensor = points.unsqueeze(0)  # (1, N, 2)
-                        labels_tensor = point_labels.unsqueeze(0)  # (1, N)
-                    else:
+                        # 将大框和小框合并，形状为 (2, 4)
+                        boxes_tensor = torch.tensor([big_box, small_box], device=device, dtype=torch.float32)  # (2, 4)
                         points_tensor = None
                         labels_tensor = None
-                        box_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)
+                    else:
+                        # 如果没有 small_box，只使用 big_box
+                        boxes_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)  # (1, 4)
+                        points_tensor = None
+                        labels_tensor = None
+                    
+                    # 方案2：使用点 prompt（保留作为备选）
+                    # if small_box is not None:
+                    #     points, point_labels = sample_points_in_ring(
+                    #         small_box, big_box, 
+                    #         num_points=10,
+                    #         img_size=sam_input_size
+                    #     )
+                    #     points = points.to(device)
+                    #     point_labels = point_labels.to(device)
+                    #     points_tensor = points.unsqueeze(0)
+                    #     labels_tensor = point_labels.unsqueeze(0)
+                    #     boxes_tensor = None
+                    # else:
+                    #     boxes_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)
+                    #     points_tensor = None
+                    #     labels_tensor = None
                     
                     try:
                         # 处理DataParallel：需要通过module访问
                         sam_prompt_encoder = sam.module.prompt_encoder if use_multi_gpu else sam.prompt_encoder
                         sam_mask_decoder = sam.module.mask_decoder if use_multi_gpu else sam.mask_decoder
                         
-                        if points_tensor is not None:
-                            sp, dp = sam_prompt_encoder(
-                                points=(points_tensor, labels_tensor), 
-                                boxes=None, 
-                                masks=None
-                            )
-                        else:
-                            sp, dp = sam_prompt_encoder(
-                                points=None, 
-                                boxes=box_tensor, 
-                                masks=None
-                            )
+                        # 同时输入多个框（大框+小框）
+                        sp, dp = sam_prompt_encoder(
+                            points=(points_tensor, labels_tensor) if points_tensor is not None else None,
+                            boxes=boxes_tensor,
+                            masks=None
+                        )
                         
                         # 使用 detach 的 image_embeddings 通过 decoder（decoder 冻结）
                         outb = sam_mask_decoder(

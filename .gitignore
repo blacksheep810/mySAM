@@ -1,2 +1,14 @@
 checkpoints/
-checkpoints/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+nohup.out
+*.log
+outputs/
+output_base/
+outputs_huge/
+validate/outputs/
+validate/__pycache__/
+dataset/__pycache__/

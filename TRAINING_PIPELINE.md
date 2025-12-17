@@ -1,6 +1,31 @@
 # SAM 图像编码器微调训练流程详解
 
+## 📁 代码文件总览
+
+| 文件路径 | 主要功能 | 关键类/函数 |
+|---------|---------|------------|
+| `train.py` | 训练入口 | `main()` |
+| `training/trainer.py` | 训练器主类 | `Trainer` 类（~750行） |
+| `config/args.py` | 参数配置 | `build_argparser()` |
+| `models/sam_wrapper.py` | SAM 模型封装 | `load_sam_model()`, `create_teacher_model()` |
+| `models/projection.py` | 投影头 | `PixelProjHead` 类 |
+| `models/losses.py` | 损失函数 | `DiceLoss`, `pixel_info_nce()` |
+| `utils/prompts.py` | Prompt 处理 | `prepare_box_prompts()` |
+| `utils/metrics.py` | 评估指标 | `compute_miou()`, `mask_entropy_logits()` |
+| `training/data_utils.py` | 数据工具 | `collate_fn_isic()` |
+| `dataset/ISIC.py` | ISIC 数据集 | `ISIC2016Dataset` 类 |
+
+**核心文件**：`training/trainer.py` 包含所有训练逻辑，建议重点阅读。
+
+---
+
 ## 一、模型架构概述
+
+**相关代码文件**：
+- `train.py` - 训练入口
+- `training/trainer.py` - 训练器主类
+- `models/sam_wrapper.py` - SAM 模型封装
+- `models/projection.py` - 投影头实现
 
 ### 1.1 核心组件
 
@@ -30,9 +55,18 @@ SAM 模型结构：
 
 ### 阶段 0：初始化与准备
 
+**相关代码文件**：
+- `training/trainer.py::Trainer.__init__()` - 初始化方法
+- `training/trainer.py::Trainer._setup_models()` - 模型设置
+- `models/sam_wrapper.py::load_sam_model()` - SAM 模型加载
+- `models/sam_wrapper.py::create_teacher_model()` - Teacher 模型创建
+- `models/projection.py::PixelProjHead` - 投影头类
+
 #### 2.1 模型加载与参数设置
 
 **作用**：加载预训练 SAM 模型，设置参数冻结策略，初始化投影头。
+
+**代码位置**：`training/trainer.py::Trainer._setup_models()` (第108-143行)
 
 ```python
 # 加载 Student 模型（可训练）
@@ -75,9 +109,19 @@ for p in sam.image_encoder.parameters():
 
 ### 阶段 1：数据准备
 
+**相关代码文件**：
+- `training/trainer.py::Trainer._setup_dataloader()` - 数据加载器设置
+- `training/data_utils.py::collate_fn_isic()` - Batch 整理函数
+- `dataset/ISIC.py::ISIC2016Dataset` - ISIC 数据集类
+- `training/trainer.py::Trainer._prepare_images_and_boxes()` - 图像预处理
+
 #### 1.1 数据加载
 
 **作用**：从 ISIC 数据集加载图像、大小框、mask 等信息。
+
+**代码位置**：
+- 数据集加载：`training/trainer.py::Trainer._setup_dataloader()` (第177-201行)
+- Batch 整理：`training/data_utils.py::collate_fn_isic()` (第12-54行)
 
 ```python
 # 数据格式
@@ -97,7 +141,42 @@ gt_masks = batch['mask'].to(device)
 B = images.size(0)
 ```
 
+#### 1.2 图像和框的预处理
+
+**作用**：将图像 resize 到 SAM 输入尺寸（1024x1024），并相应缩放 box 坐标。
+
+**代码位置**：`training/trainer.py::Trainer._prepare_images_and_boxes()` (第203-232行)
+
+```python
+def _prepare_images_and_boxes(images, boxes_list, small_boxes_list):
+    """
+    准备图像和框（resize 到 SAM 输入尺寸）
+    """
+    B = images.size(0)
+    
+    if images.shape[-1] != 1024 or images.shape[-2] != 1024:
+        # Resize 图像到 SAM 期望的尺寸
+        images_sam = F.interpolate(
+            images, 
+            size=(1024, 1024), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        # 缩放 box 坐标
+        scale_factor = 1024 / args.img_size
+        boxes_list_sam = [coord * scale_factor for coord in boxes_list]
+        small_boxes_list_sam = [coord * scale_factor for coord in small_boxes_list]
+    else:
+        images_sam = images
+        boxes_list_sam = boxes_list
+        small_boxes_list_sam = small_boxes_list
+    
+    return images_sam, boxes_list_sam, small_boxes_list_sam
+```
+
 **关键点**：
+- SAM 预训练时使用 1024x1024 输入，需要将图像 resize 到此尺寸
+- box 坐标需要按比例缩放
 - 大小框提供弱监督信息（目标的大致范围和核心区域）
 - GT mask 用于监督损失（但 decoder 冻结，仅用于监控）
 
@@ -105,38 +184,39 @@ B = images.size(0)
 
 ### 阶段 2：Teacher 生成伪标签
 
-#### 2.1 中间区域点采样
+**相关代码文件**：
+- `training/trainer.py::Trainer._teacher_forward()` - Teacher 前向传播
+- `utils/prompts.py::prepare_box_prompts()` - 框 prompt 准备
+- `utils/metrics.py::mask_entropy_logits()` - 熵计算
 
-**作用**：在大小框之间的环形区域采样离散点，作为 SAM 的 prompt，帮助定位目标边界。
+#### 2.1 大小框信息输入作为 prompt
+
+**作用**：使用大小框作为 prompt 输入给 SAM，提供弱监督信息。
+
+**代码位置**：`utils/prompts.py::prepare_box_prompts()` (第94-114行)
 
 ```python
-def sample_points_in_ring(small_box, big_box, num_points=10, img_size=512):
+def prepare_box_prompts(big_box, small_box, device):
     """
-    在 small_box 和 big_box 之间的环形区域随机采样点
+    准备框 prompt（大框+小框）
+    将多个框合并为 tensor
     
     原理：
-    - 小框：目标核心区域
     - 大框：目标大致范围
-    - 环形区域：边界区域，提供边界信息
+    - 小框：目标核心区域
+    - SAM 可以同时使用多个框作为 prompt
     """
-    points = []
-    while len(points) < num_points:
-        # 在 big_box 内随机采样
-        x = np.random.uniform(bx1, bx2)
-        y = np.random.uniform(by1, by2)
-        
-        # 检查是否在环形区域内（在 big_box 内但不在 small_box 内）
-        in_big = (bx1 <= x <= bx2) and (by1 <= y <= by2)
-        in_small = (sx1 <= x <= sx2) and (sy1 <= y <= sy2)
-        
-        if in_big and not in_small:
-            points.append([x, y])
-            labels.append(1)  # 前景点
+    if small_box is not None:
+        # 将大框和小框合并，形状为 (2, 4)
+        boxes_tensor = torch.tensor([big_box, small_box], device=device, dtype=torch.float32)
+    else:
+        # 如果没有 small_box，只使用 big_box
+        boxes_tensor = torch.tensor([big_box], device=device, dtype=torch.float32)
     
-    return points, labels  # (N, 2), (N,)
+    return boxes_tensor  # (N, 4)，N=2 如果有 small_box，否则 N=1
+```
 ```
 
-**可视化**：
 ```
 ┌─────────────────────────┐
 │   Big Box (大框)        │
@@ -145,7 +225,7 @@ def sample_points_in_ring(small_box, big_box, num_points=10, img_size=512):
 │  │  ┌─────────────┐  │  │
 │  │  │  核心区域   │  │  │
 │  │  └─────────────┘  │  │
-│  │  • • • • • • •    │  │ ← 环形区域（采样点）
+│  │                   │  │ 
 │  └───────────────────┘  │
 └─────────────────────────┘
 ```
@@ -153,6 +233,8 @@ def sample_points_in_ring(small_box, big_box, num_points=10, img_size=512):
 #### 2.2 Teacher 前向传播
 
 **作用**：使用冻结的 Teacher 模型生成伪标签，作为对比学习的监督信号。
+
+**代码位置**：`training/trainer.py::Trainer._teacher_forward()` (第234-309行)
 
 ```python
 with torch.no_grad():  # Teacher 不参与梯度计算
@@ -162,22 +244,18 @@ with torch.no_grad():  # Teacher 不参与梯度计算
     all_mask_logits = []
     all_mask_entropy = []
     
-    for b in range(B):
-        # 2. 在大小框中间区域采样点作为 prompt
-        points, labels = sample_points_in_ring(
-            small_boxes[b], big_boxes[b], 
-            num_points=10,
-            img_size=args.img_size
-        )
-        points_tensor = points.unsqueeze(0).to(device)  # (1, N, 2)
-        labels_tensor = labels.unsqueeze(0).to(device)  # (1, N)
-        
-        # 3. 编码 prompt
-        sparse_p, dense_p = teacher.prompt_encoder(
-            points=(points_tensor, labels_tensor),
-            boxes=None,
-            masks=None
-        )
+            for b in range(B):
+                # 2. 准备框 prompt（大框+小框）
+                big_box = boxes_list_sam[b]
+                small_box = small_boxes_list_sam[b]
+                boxes_tensor = prepare_box_prompts(big_box, small_box, device)  # (N, 4)
+                
+                # 3. 编码 prompt
+                sparse_p, dense_p = teacher.prompt_encoder(
+                    points=None,
+                    boxes=boxes_tensor,
+                    masks=None
+                )
         
         # 4. 生成伪标签 mask
         out = teacher.mask_decoder(
@@ -201,12 +279,17 @@ with torch.no_grad():  # Teacher 不参与梯度计算
 
 **关键点**：
 - Teacher 完全冻结，提供稳定的伪标签
-- 使用点 prompt 而非 box prompt，更精确
+- 使用框 prompt（大框+小框），提供弱监督信息
 - 计算熵用于筛选高置信样本
+- 图像会被 resize 到 SAM 输入尺寸（1024x1024），box 坐标也会相应缩放
 
 #### 2.3 熵筛选
 
 **作用**：基于熵值筛选高置信度的伪标签，只对高质量样本进行对比学习。
+
+**代码位置**：
+- 熵计算：`utils/metrics.py::mask_entropy_logits()` (第44-59行)
+- 熵筛选：`training/trainer.py::Trainer._compute_contrastive_loss()` (第460行)
 
 ```python
 def mask_entropy_logits(mask_logits):
@@ -234,9 +317,15 @@ trusted_idx = (mask_entropy_vals <= args.entropy_thresh).nonzero()  # 默认 0.2
 
 ### 阶段 3：Student 前向传播
 
+**相关代码文件**：
+- `training/trainer.py::Trainer._student_forward()` - Student 前向传播
+- `models/projection.py::PixelProjHead.forward()` - 特征投影
+
 #### 3.1 保存参考特征
 
 **作用**：保存冻结状态的 encoder 特征，用于特征蒸馏损失。
+
+**代码位置**：`training/trainer.py::Trainer._student_forward()` (第314-316行)
 
 ```python
 # 在 encoder 更新前保存参考特征
@@ -252,6 +341,8 @@ with torch.no_grad():
 
 **作用**：Student 的 image_encoder 提取特征，这是**唯一可训练**的组件。
 
+**代码位置**：`training/trainer.py::Trainer._student_forward()` (第318-324行)
+
 ```python
 # Student image_encoder 前向（可训练，需要梯度）
 img_emb = sam.image_encoder(images)  # (B, 256, H', W') - 有梯度
@@ -265,6 +356,8 @@ img_emb = sam.image_encoder(images)  # (B, 256, H', W') - 有梯度
 
 **作用**：使用冻结的 decoder 生成预测 mask，用于监控和损失计算（但不参与训练）。
 
+**代码位置**：`training/trainer.py::Trainer._student_forward()` (第326-395行)
+
 ```python
 # student decoder 前向传播（冻结，不需要梯度）
 preds = []
@@ -272,14 +365,14 @@ ious = []
 with torch.no_grad():  # decoder 冻结，不需要梯度
     for b in range(B):
         # 使用相同的 prompt（与 teacher 一致）
-        points, labels = sample_points_in_ring(small_boxes[b], big_boxes[b], ...)
-        points_tensor = points.unsqueeze(0).to(device)
-        labels_tensor = labels.unsqueeze(0).to(device)
+        big_box = boxes_list_sam[b]
+        small_box = small_boxes_list_sam[b]
+        boxes_tensor = prepare_box_prompts(big_box, small_box, device)
         
         # 编码 prompt
         sp, dp = sam.prompt_encoder(
-            points=(points_tensor, labels_tensor),
-            boxes=None,
+            points=None,
+            boxes=boxes_tensor,
             masks=None
         )
         
@@ -309,9 +402,18 @@ pred_iou = torch.cat(ious, dim=0)  # (B, 1)
 
 ### 阶段 4：损失计算
 
+**相关代码文件**：
+- `training/trainer.py::Trainer._compute_losses()` - 总损失计算
+- `training/trainer.py::Trainer._compute_contrastive_loss()` - 对比损失计算
+- `models/losses.py::DiceLoss` - Dice 损失
+- `models/losses.py::pixel_info_nce()` - InfoNCE 对比损失
+- `utils/metrics.py::compute_miou()` - mIoU 计算
+
 #### 4.1 监督 Mask 损失（仅监控）
 
 **作用**：计算预测 mask 与 GT mask 的差异，**仅用于监控**，不参与训练。
+
+**代码位置**：`training/trainer.py::Trainer._compute_losses()` (第402-411行)
 
 ```python
 # Mask 损失（不参与训练，decoder 冻结）
@@ -343,7 +445,11 @@ Loss = 1 - Dice
 
 **作用**：通过对比学习优化 encoder 特征表示，这是**主要的训练信号**。
 
+**代码位置**：`training/trainer.py::Trainer._compute_contrastive_loss()` (第454-594行)
+
 ##### 4.2.1 特征投影
+
+**代码位置**：`models/projection.py::PixelProjHead.forward()` (第36-51行)
 
 ```python
 # 投影到对比学习空间
@@ -352,6 +458,8 @@ Bz, D, Hf, Wf = z.shape
 ```
 
 ##### 4.2.2 创建空间掩码
+
+**代码位置**：`training/trainer.py::Trainer._compute_contrastive_loss()` (第495-513行)
 
 ```python
 for b in range(B):
@@ -374,6 +482,8 @@ for b in range(B):
 ```
 
 ##### 4.2.3 选择显著性正样本
+
+**代码位置**：`training/trainer.py::Trainer._compute_contrastive_loss()` (第515-541行)
 
 ```python
 # 正样本 = 伪标签 AND 小框（高度重叠区域）
@@ -408,6 +518,8 @@ positives = t_z[chosen_pos]  # (npos, 64) - Teacher 特征
 ```
 
 ##### 4.2.4 选择困难负样本
+
+**代码位置**：`training/trainer.py::Trainer._compute_contrastive_loss()` (第543-568行)
 
 ```python
 hard_neg_list = []
@@ -458,6 +570,10 @@ else:
 
 ##### 4.2.5 计算 InfoNCE 损失
 
+**代码位置**：
+- InfoNCE 函数：`models/losses.py::pixel_info_nce()` (第49-70行)
+- 调用位置：`training/trainer.py::Trainer._compute_contrastive_loss()` (第593行)
+
 ```python
 def pixel_info_nce(anchors, positives, negatives, temperature=0.1):
     """
@@ -500,11 +616,13 @@ L = -log(exp(sim(anchor, positive) / τ) /
 
 **作用**：计算预测 IoU 与实际 IoU 的差异，**仅用于监控**。
 
+**代码位置**：`training/trainer.py::Trainer._compute_losses()` (第419-427行)
+
 ```python
 loss_iou = torch.tensor(0.0, device=device)
 if pred_iou is not None:
     with torch.no_grad():  # 不参与训练
-        # 计算实际 IoU
+        # 计算实际 IoU（Student 预测 vs Teacher 伪标签）
         pred_bin = (torch.sigmoid(pred_logits) > 0.5).float()
         teacher_bin = (torch.sigmoid(mask_logits_stack) > 0.5).float()
         
@@ -519,10 +637,13 @@ if pred_iou is not None:
 **关键点**：
 - 仅用于监控，不参与训练
 - 评估模型对预测质量的估计能力
+- 计算的是 Student 预测与 Teacher 伪标签之间的 IoU
 
 #### 4.4 特征蒸馏损失
 
 **作用**：约束 encoder 不要过度偏离预训练状态，防止灾难性遗忘。
+
+**代码位置**：`training/trainer.py::Trainer._compute_losses()` (第429-446行)
 
 ```python
 loss_distill = torch.tensor(0.0, device=device)
@@ -546,6 +667,8 @@ except:
 
 #### 4.5 总损失
 
+**代码位置**：`training/trainer.py::Trainer._compute_losses()` (第448-452行)
+
 ```python
 # 损失权重
 alpha = 1.0   # 对比损失（主要）
@@ -566,25 +689,53 @@ loss = loss_mask + alpha * loss_contrast + beta * loss_iou + gamma * loss_distil
 
 ### 阶段 5：反向传播与更新
 
+**相关代码文件**：
+- `training/trainer.py::Trainer.train()` - 主训练循环
+- `training/trainer.py::Trainer._update_ema_teacher()` - EMA Teacher 更新
+
 #### 5.1 反向传播
 
 **作用**：计算梯度并更新可训练参数（image_encoder + proj）。
 
+**代码位置**：`training/trainer.py::Trainer.train()` (第666-694行)
+
 ```python
 # 反向传播
-optimizer.zero_grad()
+# 支持梯度累积
+loss = loss / gradient_accumulation_steps
 loss.backward()
-torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)  # 梯度裁剪
-optimizer.step()
+
+# 梯度更新（每 gradient_accumulation_steps 步更新一次）
+if (step + 1) % gradient_accumulation_steps == 0:
+    # 梯度裁剪
+    torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+    
+    # 优化器更新（支持混合精度）
+    if use_amp:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+    
+    optimizer.zero_grad()
+    
+    # 更新学习率调度器
+    scheduler.step()  # CosineAnnealingLR
 ```
 
 **关键点**：
+- 使用 **AdamW** 优化器
+- 使用 **CosineAnnealingLR** 学习率调度器
+- 支持梯度累积以模拟更大的 batch size
+- 支持混合精度训练（AMP）
 - 只有 `image_encoder` 和 `proj` 的参数会被更新
 - Decoder 和 prompt_encoder 保持冻结
 
 #### 5.2 EMA Teacher 更新
 
 **作用**：使用指数移动平均更新 Teacher 模型，提供更稳定的伪标签。
+
+**代码位置**：`training/trainer.py::Trainer._update_ema_teacher()` (第596-606行)
 
 ```python
 # EMA 更新 Teacher
@@ -612,10 +763,12 @@ teacher_param = 0.999 * teacher_param + 0.001 * student_param
 ```
 输入图像 (B, 3, H, W)
     ↓
+    resize 到 1024x1024，缩放 box 坐标
+    ↓
 ┌─────────────────────────────────────┐
 │  Teacher (冻结)                     │
 │  ├─ image_encoder → t_img_emb       │
-│  ├─ prompt_encoder (点 prompt)      │
+│  ├─ prompt_encoder (框 prompt)      │
 │  └─ mask_decoder → 伪标签           │
 │     └─ 熵筛选 → 高置信样本           │
 └─────────────────────────────────────┘
@@ -624,7 +777,7 @@ teacher_param = 0.999 * teacher_param + 0.001 * student_param
 │  Student (可训练)                   │
 │  ├─ image_encoder → img_emb ✅      │
 │  │   └─ proj → z (对比特征) ✅      │
-│  ├─ prompt_encoder (点 prompt) ❌   │
+│  ├─ prompt_encoder (框 prompt) ❌   │
 │  └─ mask_decoder → pred_logits ❌   │
 └─────────────────────────────────────┘
     ↓
@@ -650,7 +803,13 @@ teacher_param = 0.999 * teacher_param + 0.001 * student_param
 
 ## 四、关键超参数
 
+**相关代码文件**：
+- `config/args.py` - 所有超参数定义
+- `training/trainer.py::Trainer._setup_optimizer()` - 优化器和调度器设置
+
 ### 4.1 学习率
+
+**代码位置**：`config/args.py` (第40-41行)
 
 ```python
 lr_encoder = 2e-6      # encoder 学习率（较小，因为是大模型）
@@ -658,6 +817,8 @@ lr_decoder = 1e-4      # decoder 学习率（不使用，decoder 冻结）
 ```
 
 ### 4.2 对比学习
+
+**代码位置**：`config/args.py` (第45-48行)
 
 ```python
 pos_samples = 256      # 正样本数量
@@ -667,11 +828,15 @@ temperature = 0.1      # InfoNCE 温度参数
 
 ### 4.3 筛选阈值
 
+**代码位置**：`config/args.py` (第49行)
+
 ```python
 entropy_thresh = 0.2   # 熵阈值（低熵 = 高置信）
 ```
 
 ### 4.4 损失权重
+
+**代码位置**：`training/trainer.py::Trainer._compute_losses()` (第449行)
 
 ```python
 alpha = 1.0   # 对比损失权重（主要）
@@ -680,6 +845,8 @@ gamma = 0.1   # 蒸馏损失权重（辅助）
 ```
 
 ### 4.5 EMA
+
+**代码位置**：`training/trainer.py::Trainer.__init__()` (第77行)
 
 ```python
 ema_decay = 0.999      # Teacher 更新系数
@@ -705,18 +872,27 @@ ema_decay = 0.999      # Teacher 更新系数
 
 ### 5.3 关键技术
 
-1. **中间区域点采样**：提供边界信息
-2. **显著性正样本**：双重验证（小框 + 伪标签）
-3. **困难负样本**：针对两类错误（漏检、误检）
-4. **熵筛选**：只使用高置信伪标签
-5. **EMA Teacher**：稳定的伪标签生成
+1. **框 prompt**：使用大小框作为 prompt，提供弱监督信息
+2. **图像预处理**：resize 到 SAM 输入尺寸（1024x1024），缩放 box 坐标
+3. **显著性正样本**：双重验证（小框 + 伪标签）
+4. **困难负样本**：针对两类错误（漏检、误检）
+5. **熵筛选**：只使用高置信伪标签
+6. **EMA Teacher**：稳定的伪标签生成
+7. **多GPU支持**：使用 DataParallel 支持多GPU训练
+8. **混合精度训练**：支持 AMP 以节省显存
 
 ---
 
 ## 六、使用示例
 
+**相关代码文件**：
+- `train.py` - 训练入口脚本
+- `config/args.py::build_argparser()` - 参数解析器
+
+**代码位置**：`train.py` (第13-20行)
+
 ```bash
-python model.py \
+python train.py \
   --data_root ./data/ISIC \
   --train_box_csv ./data/ISIC/train_boxes.csv \
   --sam_checkpoint ./checkpoints/sam_vit_b_01ec64.pth \
@@ -729,7 +905,10 @@ python model.py \
   --pos_samples 256 \
   --neg_samples 1024 \
   --temperature 0.1 \
-  --entropy_thresh 0.2
+  --entropy_thresh 0.2 \
+  --use_amp \  # 可选：使用混合精度训练
+  --multi_gpu \  # 可选：使用多GPU训练
+  --use_gradient_checkpointing  # 可选：使用梯度检查点节省显存
 ```
 
 ---
@@ -739,22 +918,27 @@ python model.py \
 训练过程中会输出以下指标：
 
 ```
-E1 L=2.3226 mask=0.2250 cont=2.0826 iou=0.0299
+E1 L=2.3226 mask=0.2250 cont=2.0826 iou=0.0299 mIOU=0.8234 GPU:2.45/3.21GB
 ```
 
 - `L`：总损失
 - `mask`：Mask 损失（监控）
 - `cont`：对比损失（主要训练信号）
 - `iou`：IoU 损失（监控）
+- `mIOU`：平均 IoU（监控指标）
+- `GPU`：显存使用情况（已分配/已保留）
 
 **期望趋势**：
 - `cont` 应持续下降（主要优化目标）
 - `mask` 和 `iou` 用于监控，可能波动
+- `mIOU` 应逐步提升
 - 总损失 `L` 应整体下降
 
 ---
 
 ## 八、Checkpoint 保存
+
+**代码位置**：`training/trainer.py::Trainer._save_checkpoint()` (第608-624行)
 
 ```python
 ckpt = {
@@ -773,4 +957,34 @@ torch.save(ckpt, 'checkpoint_epoch_{epoch+1}.pth')
 ## 九、总结
 
 本训练框架通过**只微调 image_encoder** 的策略，结合**像素级对比学习**和**困难负样本挖掘**，在保持 SAM decoder 预训练能力的同时，优化 encoder 的特征表示能力。主要训练信号来自对比损失，通过拉近正样本、推远负样本，学习区分前景/背景的特征表示。
+
+### 9.2 代码文件索引
+
+**核心文件**：
+- `train.py` - 训练入口
+- `training/trainer.py` - 训练器主类（~750行），包含所有训练逻辑
+- `config/args.py` - 参数配置（71行）
+
+**模型相关**：
+- `models/sam_wrapper.py` - SAM 模型封装（183行）
+- `models/projection.py` - 投影头（52行）
+- `models/losses.py` - 损失函数（71行）
+
+**工具函数**：
+- `utils/prompts.py` - Prompt 处理（134行）
+- `utils/metrics.py` - 评估指标（61行）
+- `utils/training_utils.py` - 训练工具函数
+- `training/data_utils.py` - 数据工具（55行）
+
+**数据集**：
+- `dataset/ISIC.py` - ISIC 数据集类
+
+### 9.1 关键修正说明
+
+1. **Prompt 类型**：实际代码使用**框 prompt**（大框+小框），而非点 prompt
+2. **图像预处理**：图像会被 resize 到 SAM 输入尺寸（1024x1024），box 坐标相应缩放
+3. **IoU 损失**：计算的是 Student 预测与 Teacher 伪标签之间的 IoU
+4. **多GPU支持**：代码支持 DataParallel 多GPU训练
+5. **混合精度**：支持 AMP 混合精度训练以节省显存
+6. **梯度累积**：支持梯度累积以模拟更大的 batch size
 
