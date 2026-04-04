@@ -85,7 +85,8 @@ def compute_miou(pred_mask, gt_mask):
         ).squeeze(0).squeeze(0)
     
     # 获取统计信息（使用 (H, W) vs (H, W) 格式，与 wesam 原始代码保持一致）
-    # pred_mask 是 logits，threshold=0.5 作用于 logits（等价于 sigmoid(logits) >= 0.622）
+    # pred_mask 是 logits，smp.metrics.get_stats 在 mode='binary' 时会先应用 sigmoid，然后与 threshold 比较
+    # threshold=0.5 意味着 sigmoid(logits) >= 0.5，即 logits >= 0
     batch_stats = smp.metrics.get_stats(
         pred_mask,      # (H, W) 格式，logits
         gt_mask.int(),  # (H, W) 格式
@@ -265,7 +266,6 @@ def evaluate_model(model, dataloader, device, model_name="Model", save_vis=False
             img_names = batch.get('img_names', [f'img_{batch_idx}_{i}' for i in range(len(big_boxes))])
             
             B = images.size(0)
-            num_images = B  # batch 大小，用于权重计算（与 wesam 原始代码保持一致）
             
             for b in range(B):
                 image = images[b]  # (3, H, W)
@@ -281,9 +281,10 @@ def evaluate_model(model, dataloader, device, model_name="Model", save_vis=False
                     model, image, box, device
                 )
                 
-                # 计算 IoU（使用 num_images 作为权重，与 wesam 原始代码保持一致）
+                # 计算 IoU（每张图像的权重为 1，而不是 batch_size）
+                # 修复：之前使用 num_images (batch_size) 作为权重，导致每张图像的 IoU 被重复累计 B 次
                 iou = compute_miou(pred_mask.cpu(), gt_mask.cpu())
-                ious.update(iou, num_images)
+                ious.update(iou, n=1)  # 每张图像的权重为 1
                 
                 # 保存可视化结果
                 if save_vis and vis_dir:

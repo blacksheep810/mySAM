@@ -45,10 +45,29 @@ class ISIC2016Dataset(Dataset):
         max_x2 = row['max_boxes_x2']
         max_y2 = row['max_boxes_y2']
         
-        min_x1 = row['min_boxes_x1']
-        min_y1 = row['min_boxes_y1']
-        min_x2 = row['min_boxes_x2']
-        min_y2 = row['min_boxes_y2']
+        # 优先读取四个角点坐标（如果存在），否则使用AABB
+        if 'small_box_corner1_x' in row:
+            # 读取旋转框的四个角点
+            small_box_corners = np.array([
+                [row['small_box_corner1_x'], row['small_box_corner1_y']],
+                [row['small_box_corner2_x'], row['small_box_corner2_y']],
+                [row['small_box_corner3_x'], row['small_box_corner3_y']],
+                [row['small_box_corner4_x'], row['small_box_corner4_y']]
+            ], dtype=np.float32)
+            # 计算AABB用于向后兼容
+            min_x1 = float(np.min(small_box_corners[:, 0]))
+            min_y1 = float(np.min(small_box_corners[:, 1]))
+            min_x2 = float(np.max(small_box_corners[:, 0]))
+            min_y2 = float(np.max(small_box_corners[:, 1]))
+            has_rotated_corners = True
+        else:
+            # 向后兼容：使用AABB
+            min_x1 = row['min_boxes_x1']
+            min_y1 = row['min_boxes_y1']
+            min_x2 = row['min_boxes_x2']
+            min_y2 = row['min_boxes_y2']
+            small_box_corners = None
+            has_rotated_corners = False
 
         img_path = os.path.join(self.img_dir, img_name)
         mask_path = os.path.join(self.mask_dir, mask_name)
@@ -100,8 +119,19 @@ class ISIC2016Dataset(Dataset):
         # 确保 box 坐标在有效范围内
         big_box = torch.clamp(big_box, 0, self.img_size)
         small_box = torch.clamp(small_box, 0, self.img_size)
+        
+        # 缩放旋转框的四个角点（如果存在）
+        if has_rotated_corners:
+            small_box_corners_scaled = small_box_corners.copy()
+            small_box_corners_scaled[:, 0] *= scale_x
+            small_box_corners_scaled[:, 1] *= scale_y
+            # 确保角点在有效范围内
+            small_box_corners_scaled[:, 0] = np.clip(small_box_corners_scaled[:, 0], 0, self.img_size)
+            small_box_corners_scaled[:, 1] = np.clip(small_box_corners_scaled[:, 1], 0, self.img_size)
+        else:
+            small_box_corners_scaled = None
 
-        return image, big_box, small_box, mask, img_name
+        return image, big_box, small_box, mask, img_name, small_box_corners_scaled
 
 
 # In[11]:

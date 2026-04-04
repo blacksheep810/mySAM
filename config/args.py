@@ -47,6 +47,7 @@ def build_argparser():
     p.add_argument('--neg_samples', type=int, default=1024, help='Negative samples count')
     p.add_argument('--temperature', type=float, default=0.1, help='Temperature parameter')
     p.add_argument('--entropy_thresh', type=float, default=0.2, help='Entropy threshold (for pseudo-label filtering)')
+    p.add_argument('--pos_neg_ratio', type=float, default=0.25, help='Target positive/negative ratio (default 0.25 means 1:4 ratio)')
     
     # ========== Optimization parameters ==========
     p.add_argument('--use_gradient_checkpointing', action='store_true', 
@@ -66,5 +67,69 @@ def build_argparser():
     # ========== Output parameters ==========
     p.add_argument('--output_dir', type=str, default='./outputs', help='Output directory')
     p.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs')
+    
+    # ========== Poor sample detection parameters ==========
+    p.add_argument('--detect_poor_samples', action='store_true',
+                   help='Enable poor sample detection during training')
+    p.add_argument('--poor_sample_iou_threshold_severe', type=float, default=0.75,
+                   help='IoU threshold for severe poor samples (default: 0.75, samples with IoU < 0.75 are severe)')
+    p.add_argument('--poor_sample_iou_threshold_moderate', type=float, default=0.8,
+                   help='IoU threshold for moderate poor samples (default: 0.8, samples with 0.75 <= IoU < 0.8 are moderate)')
+    p.add_argument('--poor_sample_save_interval', type=int, default=1,
+                   help='Save poor samples every N epochs (default: 1)')
+    
+    # ========== Teacher-Student training parameters ==========
+    p.add_argument('--teacher_warmup_epochs', type=int, default=3,
+                   help='Number of epochs to wait before updating teacher (warm-up, default: 3)')
+    p.add_argument('--hard_sample_min_confidence', type=float, default=0.7,
+                   help='Minimum confidence threshold for hard samples (default: 0.7, only use high-confidence hard samples)')
+    p.add_argument('--hard_sample_max_weight', type=float, default=0.2,
+                   help='Maximum weight cap for hard samples (default: 0.2, doc suggests 0.2 to reduce miou degradation)')
+    p.add_argument('--hard_sample_start_progress', type=float, default=0.6,
+                   help='Training progress to start introducing hard samples (default: 0.6=60%%, 0.7=70%% to delay)')
+    
+    # ========== Checkpoint and early stopping (调优建议) ==========
+    p.add_argument('--save_best_ckpt', action='store_true',
+                   help='Also save checkpoint when mIOU reaches new best (for eval/deploy)')
+    p.add_argument('--early_stop_patience', type=int, default=0,
+                   help='Stop training if no mIOU improvement for N epochs (0=disabled, 5 suggested in doc)')
+    
+    # ========== Transition region sampling parameters ==========
+    p.add_argument('--transition_region_enabled', action='store_true',
+                   help='Enable transition region (between small box and big box) sampling for boundary learning')
+    p.add_argument('--transition_region_sampling_ratio', type=float, default=1.5,
+                   help='Sampling ratio for transition region compared to small box region (default: 1.5, means 1.5x more samples)')
+    p.add_argument('--transition_region_min_confidence', type=float, default=0.6,
+                   help='Minimum confidence threshold for transition region samples (default: 0.6, lower than small box due to higher uncertainty)')
+    p.add_argument('--transition_region_max_ratio', type=float, default=0.3,
+                   help='Maximum ratio of transition region samples in total positive samples (default: 0.3, means max 30% of positives from transition)')
+    
+    # ========== 强数据增强与伪标签 Dice（提升 mIOU 见效） ==========
+    p.add_argument('--student_strong_aug', action='store_true',
+                   help='Apply strong color augmentation to Student input (Teacher uses original; improves robustness)')
+    p.add_argument('--pseudo_dice_weight', type=float, default=0.0,
+                   help='Weight for pseudo-label Dice loss (Student pred vs Teacher pred, 0=disabled, 0.1-0.3 suggested)')
+    p.add_argument('--pseudo_dice_use_confidence_mask', action='store_true',
+                   help='Only compute pseudo Dice on teacher high-confidence pixels')
+    p.add_argument('--pseudo_dice_confidence_thresh', type=float, default=0.8,
+                   help='Teacher confidence threshold used by pseudo Dice confidence mask')
+    p.add_argument('--pseudo_dice_boundary_weighted', action='store_true',
+                   help='Upweight high-entropy / disagreement pixels in pseudo Dice')
+    p.add_argument('--pseudo_dice_boundary_alpha', type=float, default=1.0,
+                   help='Extra weight scale for boundary-aware pseudo Dice')
+
+    # ========== Teacher 更新策略（平台期阶段重点） ==========
+    p.add_argument('--ema_fixed_decay', type=float, default=0.0,
+                   help='Fixed EMA decay; 0 means use built-in dynamic schedule, recommended ablation: 0.999 / 0.9995')
+    p.add_argument('--ema_update_interval', type=int, default=1,
+                   help='Update teacher every N optimizer steps (default 1 means every step)')
+
+    # ========== TS 分歧驱动困难样本挖掘 ==========
+    p.add_argument('--hard_sample_use_disagreement', action='store_true',
+                   help='Rank hard samples by teacher-student disagreement + teacher entropy')
+    p.add_argument('--hardness_alpha', type=float, default=0.5,
+                   help='Weight of |p_t - p_s| in hardness score')
+    p.add_argument('--hardness_beta', type=float, default=0.5,
+                   help='Weight of teacher entropy in hardness score')
     
     return p

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 训练 SAM Huge (vit_h) 模型的脚本
+# 脩碌脕路 SAM Huge (vit_h) 脛拢脨脥碌脛陆脜卤戮
 
 python train.py \
   --data_root ./data/ISIC \

@@ -188,7 +188,10 @@ def collate_fn_isic(batch):
     img_names = []
     
     for item in batch:
-        image, big_box, small_box, mask, img_name = item
+        if len(item) == 6:
+            image, big_box, small_box, mask, img_name, _ = item  # 兼容旋转框角点
+        else:
+            image, big_box, small_box, mask, img_name = item
         images.append(image)
         big_boxes_list.append(big_box.tolist())  # 转换为 list
         small_boxes_list.append(small_box.tolist())
@@ -545,7 +548,7 @@ def train_main(args):
     )
 
     # EMA teacher decay
-    ema_decay = 0.999
+    ema_decay = 0.99
 
     # -----------------------------
     # 训练循环
